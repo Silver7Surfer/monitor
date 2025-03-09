@@ -49,34 +49,34 @@ async function processDeposits(deposits) {
 /**
  * Check for deposits across all networks
  * @returns {Promise<Array>} Array of all deposits found
- * 
  */
-
-
-
 async function checkDeposits() {
-  // Get BEP20 deposits
-  const bep20Deposits = await bep20Service.checkAllAddresses();
-  
-  // Get TRC20 deposits
-  const trc20Deposits = await trc20Service.checkAllAddresses();
+  try {
+    // Get BEP20 deposits
+    const bep20Deposits = await bep20Service.checkAllAddresses();
+    
+    // Get TRC20 deposits
+    const trc20Deposits = await trc20Service.checkAllAddresses();
 
-  // Get BTC deposits
-  const btcDeposits = await btcService.checkAllAddresses();
-  
-  // Combine all deposits from different networks
-  const allDeposits = [
-    ...bep20Deposits,
-    ...trc20Deposits,
-    ...btcDeposits
-    // Add more networks here as needed (btc, etc.)
-  ];
-  
-  if (allDeposits.length > 0) {
-    await processDeposits(allDeposits);
+    // Get BTC deposits
+    const btcDeposits = await btcService.checkAllAddresses();
+    
+    // Combine all deposits from different networks
+    const allDeposits = [
+      ...bep20Deposits,
+      ...trc20Deposits,
+      ...btcDeposits
+    ];
+    
+    if (allDeposits.length > 0) {
+      await processDeposits(allDeposits);
+    }
+    
+    return allDeposits;
+  } catch (error) {
+    console.error('Error in checkDeposits:', error.message);
+    return [];
   }
-  
-  return allDeposits;
 }
 
 /**
@@ -87,15 +87,47 @@ function startMonitoring() {
   
   // Initial fetch and check
   addressService.fetchAddresses().then(() => {
+    // Initialize real-time services
+    bep20Service.init();
+    trc20Service.init();
+    
+    // Initialize BTC service if it has an init function
+    if (typeof btcService.init === 'function') {
+      btcService.init(addressService.getAddresses().btc);
+    }
+    
+    // Initial check for any missed deposits
     checkDeposits();
+  }).catch(error => {
+    console.error('Error fetching addresses:', error.message);
   });
   
-  // Set up periodic checking
+  // Set up periodic checking (as backup to real-time monitoring)
   monitoringInterval = setInterval(checkDeposits, CHECK_INTERVAL);
   
   // Set up periodic address refresh
   addressRefreshInterval = setInterval(() => {
-    addressService.fetchAddresses();
+    const oldAddresses = {
+      bep20: [...addressService.getAddresses().bep20],
+      trc20: [...addressService.getAddresses().trc20],
+      btc: [...addressService.getAddresses().btc]
+    };
+    
+    addressService.fetchAddresses().then(() => {
+      // Check for new addresses to monitor in real-time
+      const newAddresses = addressService.getAddresses();
+      
+      // Restart monitoring services if address list has changed
+      const bep20Changed = JSON.stringify(oldAddresses.bep20) !== JSON.stringify(newAddresses.bep20);
+      const trc20Changed = JSON.stringify(oldAddresses.trc20) !== JSON.stringify(newAddresses.trc20);
+      const btcChanged = JSON.stringify(oldAddresses.btc) !== JSON.stringify(newAddresses.btc);
+      
+      if (bep20Changed) bep20Service.init();
+      if (trc20Changed) trc20Service.init();
+      if (btcChanged && typeof btcService.init === 'function') btcService.init(newAddresses.btc);
+    }).catch(error => {
+      console.error('Error refreshing addresses:', error.message);
+    });
   }, ADDRESS_REFRESH_INTERVAL);
 }
 
@@ -114,6 +146,11 @@ function stopMonitoring() {
     clearInterval(addressRefreshInterval);
     addressRefreshInterval = null;
   }
+  
+  // Stop individual services if they have stop methods
+  if (typeof bep20Service.stop === 'function') bep20Service.stop();
+  if (typeof trc20Service.stop === 'function') trc20Service.stop();
+  if (typeof btcService.stop === 'function') btcService.stop();
 }
 
 /**
@@ -127,14 +164,22 @@ function getStatus() {
     processedTransactions: {
       bep20: bep20Service.getProcessedCount(),
       trc20: trc20Service.getProcessedCount(),
-      total: bep20Service.getProcessedCount() + trc20Service.getProcessedCount()
+      btc: typeof btcService.getProcessedCount === 'function' ? btcService.getProcessedCount() : 0,
+      total: bep20Service.getProcessedCount() + trc20Service.getProcessedCount() + 
+             (typeof btcService.getProcessedCount === 'function' ? btcService.getProcessedCount() : 0)
+    },
+    realTimeEnabled: {
+      bep20: !!process.env.MORALIS_API_KEY || !!process.env.BSCSCAN_WS_KEY,
+      trc20: !!process.env.TRONGRID_API_KEY,
+      btc: true // WebSocket monitoring always available for BTC
     }
-  };
+  }
 }
 
 export default {
   startMonitoring,
   stopMonitoring,
   checkDeposits,
+  processDeposits,  // Expose for real-time services to use
   getStatus
 };

@@ -2,6 +2,7 @@
 import axios from 'axios';
 import 'dotenv/config';
 import addressService from './addressService.js';
+import depositService from './depositService.js';
 
 // Store processed transactions to avoid duplicates
 const processedTxs = new Set();
@@ -11,6 +12,10 @@ const USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 
 // Delay between API requests
 const REQUEST_DELAY = 200;
+
+// Quick polling interval for real-time monitoring
+let quickPollInterval = null;
+const QUICK_POLL_INTERVAL = parseInt(process.env.TRC20_QUICK_POLL_INTERVAL) || 15000; // 15 seconds
 
 /**
  * Check for TRC20 USDT deposits for a specific address
@@ -99,6 +104,58 @@ async function checkAddress(address) {
 }
 
 /**
+ * Start real-time monitoring via quick polling
+ * TronGrid doesn't provide a reliable WebSocket API, so we use frequent polling instead
+ */
+function startRealTimeMonitoring() {
+  try {
+    // Stop existing polling if any
+    if (quickPollInterval) {
+      clearInterval(quickPollInterval);
+      quickPollInterval = null;
+    }
+    
+    if (process.env.TRONGRID_API_KEY) {
+      console.log(`Starting TRC20 real-time monitoring via quick polling (every ${QUICK_POLL_INTERVAL/1000}s)`);
+      
+      // Set up a more frequent polling interval for TRC20
+      quickPollInterval = setInterval(async () => {
+        console.log('Quick polling TRC20 transactions...');
+        const addresses = addressService.getAddresses().trc20;
+        
+        if (addresses.length === 0) {
+          console.log('No TRC20 addresses to quick poll');
+          return;
+        }
+        
+        for (let i = 0; i < addresses.length; i++) {
+          const address = addresses[i];
+          
+          try {
+            const deposits = await checkAddress(address);
+            if (deposits.length > 0) {
+              // Process these deposits
+              await depositService.processDeposits(deposits);
+            }
+            
+            // Add a small delay between requests to avoid rate limits
+            if (i < addresses.length - 1) {
+              await new Promise(resolve => setTimeout(resolve, REQUEST_DELAY));
+            }
+          } catch (error) {
+            console.error(`Error in TRC20 quick poll for ${address}:`, error.message);
+          }
+        }
+      }, QUICK_POLL_INTERVAL);
+    } else {
+      console.log('TronGrid API key not available, using standard polling for TRC20 monitoring');
+    }
+  } catch (error) {
+    console.error('Failed to start TRC20 real-time monitoring:', error.message);
+  }
+}
+
+/**
  * Check all TRC20 addresses for deposits
  * @returns {Promise<Array>} Array of all deposits found
  */
@@ -143,6 +200,28 @@ async function checkAllAddresses() {
 }
 
 /**
+ * Initialize the TRC20 monitoring service
+ */
+function init() {
+  // Start quick polling monitoring for near real-time updates
+  startRealTimeMonitoring();
+  
+  console.log('TRC20 monitoring service initialized');
+}
+
+/**
+ * Stop monitoring service
+ */
+function stop() {
+  if (quickPollInterval) {
+    clearInterval(quickPollInterval);
+    quickPollInterval = null;
+  }
+  
+  console.log('TRC20 monitoring service stopped');
+}
+
+/**
  * Get the status of processed transactions
  * @returns {number} Number of processed transactions
  */
@@ -154,5 +233,7 @@ export default {
   checkAllAddresses,
   checkAddress,
   getProcessedCount,
-  CONTRACT: USDT_CONTRACT
+  CONTRACT: USDT_CONTRACT,
+  init,
+  stop
 };

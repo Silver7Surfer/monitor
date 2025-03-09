@@ -1,13 +1,20 @@
 // src/services/btcService.js
 import axios from 'axios';
 import 'dotenv/config';
+import WebSocket from 'ws';
 import addressService from './addressService.js';
+import depositService from './depositService.js';
 
 // Store processed transactions to avoid duplicates
 const processedTxs = new Set();
 
 // Delay between API requests
 const REQUEST_DELAY = 200;
+
+// WebSocket connection
+let wsConnection = null;
+let wsReconnectTimeout = null;
+const WS_RECONNECT_DELAY = 5000;
 
 /**
  * Check for BTC deposits for a specific address
@@ -100,6 +107,171 @@ async function checkAddress(address) {
 }
 
 /**
+ * Process a BTC transaction from real-time data
+ * @param {Object} tx Transaction data
+ * @returns {Array} Array of deposit objects
+ */
+function processRealTimeTransaction(tx) {
+  try {
+    // Skip if we've already processed this transaction
+    if (processedTxs.has(tx.hash)) {
+      return [];
+    }
+    
+    const deposits = [];
+    const addresses = addressService.getAddresses().btc;
+    
+    // Find outputs to our addresses
+    if (tx.out && Array.isArray(tx.out)) {
+      for (const output of tx.out) {
+        const outputAddress = output.addr;
+        
+        // Check if this output is to one of our addresses
+        if (outputAddress && addresses.includes(outputAddress)) {
+          // Find user ID for this address
+          const userId = addressService.getUserIdForAddress(outputAddress, 'btc');
+          
+          if (userId) {
+            // Convert from satoshis to BTC
+            const amountBtc = output.value / 100000000;
+            
+            console.log(`
+📝 New BTC Deposit Found (Real-time):
+   User ID: ${userId}
+   Amount: ${amountBtc} BTC
+   To: ${outputAddress}
+   Hash: ${tx.hash}
+   Time: ${new Date().toISOString()}
+            `);
+            
+            const deposit = {
+              userId,
+              type: 'deposit',
+              asset: 'btc',
+              network: 'btc',
+              amount: amountBtc,
+              txHash: tx.hash,
+              from: tx.inputs && tx.inputs[0]?.prev_out?.addr || 'unknown',
+              to: outputAddress,
+              timestamp: new Date().toISOString(),
+              confirmations: 0  // Real-time notification, not confirmed yet
+            };
+            
+            deposits.push(deposit);
+          }
+        }
+      }
+    }
+    
+    // Mark transaction as processed if we found deposits
+    if (deposits.length > 0) {
+      processedTxs.add(tx.hash);
+    }
+    
+    return deposits;
+  } catch (error) {
+    console.error('Error processing real-time BTC transaction:', error.message);
+    return [];
+  }
+}
+
+/**
+ * Start WebSocket connection for real-time monitoring
+ */
+function startWebSocketMonitoring() {
+  try {
+    // Close existing connection if any
+    if (wsConnection) {
+      try {
+        wsConnection.terminate();
+      } catch (error) {
+        // Ignore errors on close
+      }
+    }
+    
+    // Clear any pending reconnect
+    if (wsReconnectTimeout) {
+      clearTimeout(wsReconnectTimeout);
+      wsReconnectTimeout = null;
+    }
+    
+    // Connect to blockchain.info WebSocket
+    wsConnection = new WebSocket('wss://ws.blockchain.info/inv');
+    
+    wsConnection.on('open', () => {
+      console.log('BTC WebSocket connection established');
+      
+      // Subscribe to address notifications for all monitored addresses
+      const addresses = addressService.getAddresses().btc;
+      
+      if (addresses.length > 0) {
+        console.log(`Subscribing to ${addresses.length} BTC addresses via WebSocket`);
+        
+        // First subscribe to new transactions
+        wsConnection.send(JSON.stringify({
+          "op": "unconfirmed_sub"
+        }));
+        
+        // Then subscribe to each address
+        addresses.forEach(address => {
+          wsConnection.send(JSON.stringify({
+            "op": "addr_sub",
+            "addr": address
+          }));
+        });
+      }
+    });
+    
+    wsConnection.on('message', async (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        
+        if (message.op === 'utx' || message.op === 'tx') {
+          const tx = message.x;
+          console.log(`BTC WebSocket notification received for transaction: ${tx.hash}`);
+          
+          const deposits = processRealTimeTransaction(tx);
+          
+          // If deposits found, send them to the main service for processing
+          if (deposits.length > 0) {
+            await depositService.processDeposits(deposits);
+          }
+        }
+      } catch (error) {
+        console.error('Error processing BTC WebSocket message:', error.message);
+      }
+    });
+    
+    wsConnection.on('error', (error) => {
+      console.error('BTC WebSocket error:', error.message);
+      reconnectWebSocket();
+    });
+    
+    wsConnection.on('close', () => {
+      console.log('BTC WebSocket connection closed');
+      reconnectWebSocket();
+    });
+  } catch (error) {
+    console.error('Failed to start BTC WebSocket monitoring:', error.message);
+    reconnectWebSocket();
+  }
+}
+
+/**
+ * Reconnect WebSocket after a delay
+ */
+function reconnectWebSocket() {
+  if (wsReconnectTimeout) {
+    clearTimeout(wsReconnectTimeout);
+  }
+  
+  wsReconnectTimeout = setTimeout(() => {
+    console.log('Attempting to reconnect BTC WebSocket...');
+    startWebSocketMonitoring();
+  }, WS_RECONNECT_DELAY);
+}
+
+/**
  * Check all BTC addresses for deposits
  * @returns {Promise<Array>} Array of all deposits found
  */
@@ -144,6 +316,17 @@ async function checkAllAddresses() {
 }
 
 /**
+ * Initialize the BTC monitoring service
+ * @param {Array} addresses BTC addresses to monitor (optional)
+ */
+function init(addresses) {
+  // Start WebSocket monitoring
+  startWebSocketMonitoring();
+  
+  console.log('BTC monitoring service initialized with WebSocket');
+}
+
+/**
  * Get the status of processed transactions
  * @returns {number} Number of processed transactions
  */
@@ -154,5 +337,6 @@ function getProcessedCount() {
 export default {
   checkAllAddresses,
   checkAddress,
-  getProcessedCount
+  getProcessedCount,
+  init
 };
