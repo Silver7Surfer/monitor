@@ -17,15 +17,46 @@ let wsReconnectTimeout = null;
 const WS_RECONNECT_DELAY = 5000;
 
 
+let btcPriceCache = {
+  price: 0,
+  lastFetched: 0,
+};
+
+const PRICE_CACHE_DURATION = 60000; // 60 seconds
+
 async function getBtcPrice() {
+  const now = Date.now();
+
+  // Use cached price if recent enough
+  if (btcPriceCache.price && now - btcPriceCache.lastFetched < PRICE_CACHE_DURATION) {
+    return btcPriceCache.price;
+  }
+
   try {
-    const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
-    return response.data.bitcoin.usd;
+    const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+      params: {
+        ids: 'bitcoin',
+        vs_currencies: 'usd'
+      }
+    });
+
+    const price = response.data.bitcoin?.usd;
+
+    if (!price) {
+      throw new Error('Invalid price response');
+    }
+
+    btcPriceCache.price = price;
+    btcPriceCache.lastFetched = now;
+
+    return price;
   } catch (error) {
     console.error('Error fetching BTC price:', error.message);
-    return null;
+    // Return last known price or fallback to 0
+    return btcPriceCache.price || 0;
   }
 }
+
 
 
 
@@ -81,7 +112,7 @@ async function checkAddress(address) {
       // Convert from satoshis to BTC (1 BTC = 100,000,000 satoshis)
       const amountBt = totalReceived / 100000000;
 
-      const amountBtc = amountBt * btcPrice;
+      const amountBtc = +(amountBt * btcPrice).toFixed(2);
       
       // Find user ID for this address
       const userId = addressService.getUserIdForAddress(address, 'btc');
@@ -150,7 +181,7 @@ function processRealTimeTransaction(tx) {
           if (userId) {
             // Convert from satoshis to BTC
             const amountBt = output.value / 100000000;
-            const amountBtc = amountBt * btcPrice;
+            const amountBtc = +(amountBt * btcPrice).toFixed(2);
             
             console.log(`
 📝 New BTC Deposit Found (Real-time):
