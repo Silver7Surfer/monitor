@@ -16,6 +16,19 @@ let wsConnection = null;
 let wsReconnectTimeout = null;
 const WS_RECONNECT_DELAY = 5000;
 
+
+async function getBtcPrice() {
+  try {
+    const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
+    return response.data.bitcoin.usd;
+  } catch (error) {
+    console.error('Error fetching BTC price:', error.message);
+    return null;
+  }
+}
+
+
+
 /**
  * Check for BTC deposits for a specific address
  * @param {string} address The wallet address to check
@@ -42,6 +55,7 @@ async function checkAddress(address) {
     console.log(`Found ${transactions.length} BTC transactions for address ${address}`);
 
     const deposits = [];
+    const btcPrice = await getBtcPrice();
     
     // Process transactions for this address
     for (const tx of transactions) {
@@ -65,7 +79,9 @@ async function checkAddress(address) {
       const totalReceived = receivedOutputs.reduce((sum, output) => sum + output.value, 0);
       
       // Convert from satoshis to BTC (1 BTC = 100,000,000 satoshis)
-      const amountBtc = totalReceived / 100000000;
+      const amountBt = totalReceived / 100000000;
+
+      const amountBtc = amountBt * btcPrice;
       
       // Find user ID for this address
       const userId = addressService.getUserIdForAddress(address, 'btc');
@@ -74,7 +90,7 @@ async function checkAddress(address) {
         console.log(`
 📝 New BTC Deposit Found:
    User ID: ${userId}
-   Amount: ${amountBtc} BTC
+   Amount: ${amountBt} BTC (~$${amountBtc.toFixed(2)})
    To: ${address}
    Hash: ${tx.hash}
    Block: ${tx.block_height}
@@ -133,12 +149,13 @@ function processRealTimeTransaction(tx) {
           
           if (userId) {
             // Convert from satoshis to BTC
-            const amountBtc = output.value / 100000000;
+            const amountBt = output.value / 100000000;
+            const amountBtc = amountBt * btcPrice;
             
             console.log(`
 📝 New BTC Deposit Found (Real-time):
    User ID: ${userId}
-   Amount: ${amountBtc} BTC
+   Amount: ${amountBt} BTC (~$${amountBtc.toFixed(2)})
    To: ${outputAddress}
    Hash: ${tx.hash}
    Time: ${new Date().toISOString()}
